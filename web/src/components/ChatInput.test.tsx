@@ -142,3 +142,9 @@ it('toggles web search directly from the globe button', () => {
   fireEvent.click(screen.getByRole('switch', { name: 'Enable web search' }));
   expect(onToggle).toHaveBeenLastCalledWith(true);
 });
+
+it('links the no-model panel to the LLM settings page', () => {
+  render(<MemoryRouter><ChatInput onSubmit={vi.fn()} providers={[]} /></MemoryRouter>);
+  fireEvent.click(screen.getByText('No model configured'));
+  expect(screen.getByRole('link', { name: 'Settings → LLM models' })).toHaveAttribute('href', '/settings/llm');
+});

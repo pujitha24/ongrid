@@ -742,7 +742,7 @@ function ModelDropdown({
     <PopoverTrigger className="rounded-md px-2.5 py-1.5 text-xs text-text-muted">{tr('未配置模型', 'No model configured')}</PopoverTrigger>
     <PopoverContent className="w-72 text-xs" aria-label={tr('配置模型', 'Configure model')}>
       <p>{tr('还未配置任何可用模型。', 'No usable model configured yet.')}</p>
-      <Link to="/settings/integrations" onClick={() => setOpen(false)} className="mt-2 block text-indigo-500">{tr('设置 → 集成 → LLM 模型', 'Settings → Integrations → LLM models')}</Link>
+      <Link to="/settings/llm" onClick={() => setOpen(false)} className="mt-2 block text-indigo-500">{tr('设置 → LLM 模型', 'Settings → LLM models')}</Link>
     </PopoverContent>
   </Popover>;
   return <Select
