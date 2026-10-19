@@ -55,6 +55,10 @@ type Service struct {
 
 	mu    sync.RWMutex
 	cache map[string]string // key = "category|key"
+	// gen advances on every invalidation. Get records it before reading the
+	// repo and only populates the cache if it is unchanged, so a read that
+	// raced with a write cannot repopulate the cache with a stale value.
+	gen uint64
 }
 
 // New builds the service. log may be nil.
@@ -86,6 +90,7 @@ func (s *Service) Get(ctx context.Context, category, key string) (string, bool, 
 
 	s.mu.RLock()
 	v, ok := s.cache[ck]
+	gen := s.gen
 	s.mu.RUnlock()
 	if ok {
 		return v, true, nil
@@ -100,7 +105,9 @@ func (s *Service) Get(ctx context.Context, category, key string) (string, bool, 
 	}
 
 	s.mu.Lock()
-	s.cache[ck] = row.Value
+	if s.gen == gen {
+		s.cache[ck] = row.Value
+	}
 	s.mu.Unlock()
 	return row.Value, true, nil
 }
@@ -117,9 +124,7 @@ func (s *Service) Set(ctx context.Context, category, key, value string, sensitiv
 	if _, err := s.repo.Set(ctx, category, key, value, sensitive); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	delete(s.cache, cacheKey(category, key))
-	s.mu.Unlock()
+	s.invalidate(cacheKey(category, key))
 	s.log.Info("setting updated",
 		slog.String("category", category),
 		slog.String("key", key),
@@ -148,11 +153,11 @@ func (s *Service) SetBatch(ctx context.Context, settings []model.Setting) error 
 		return fmt.Errorf("set settings batch: %w", err)
 	}
 
-	s.mu.Lock()
+	keys := make([]string, len(settings))
 	for i := range settings {
-		delete(s.cache, cacheKey(settings[i].Category, settings[i].Key))
+		keys[i] = cacheKey(settings[i].Category, settings[i].Key)
 	}
-	s.mu.Unlock()
+	s.invalidate(keys...)
 	s.log.Info("settings batch updated",
 		slog.Int("count", len(settings)),
 		slog.String("category", settings[0].Category),
@@ -262,10 +267,19 @@ func (s *Service) Delete(ctx context.Context, category, key string) error {
 	if err := s.repo.Delete(ctx, category, key); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	delete(s.cache, cacheKey(category, key))
-	s.mu.Unlock()
+	s.invalidate(cacheKey(category, key))
 	return nil
+}
+
+// invalidate drops the given entries and advances the generation so in-flight
+// Gets that read the repo before this write do not cache their stale result.
+func (s *Service) invalidate(keys ...string) {
+	s.mu.Lock()
+	s.gen++
+	for _, k := range keys {
+		delete(s.cache, k)
+	}
+	s.mu.Unlock()
 }
 
 // InvalidateAll drops every cache entry. Currently unused; left exported
@@ -273,6 +287,7 @@ func (s *Service) Delete(ctx context.Context, category, key string) error {
 // value (e.g. after a manual DB edit).
 func (s *Service) InvalidateAll() {
 	s.mu.Lock()
+	s.gen++
 	s.cache = make(map[string]string)
 	s.mu.Unlock()
 }

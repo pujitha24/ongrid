@@ -416,3 +416,66 @@ func TestAgentRuntimeVersionSelection(t *testing.T) {
 		t.Fatalf("invalid persisted version: %v", err)
 	}
 }
+
+// gatedRepo pauses Get after it has read the row, so a test can interleave a
+// write between the repo read and the cache population.
+type gatedRepo struct {
+	*fakeRepo
+	read    chan struct{} // closed-by-send once Get has read its value
+	proceed chan struct{} // Get returns after receiving
+	gate    bool
+}
+
+func (r *gatedRepo) Get(ctx context.Context, category, key string) (*model.Setting, error) {
+	row, err := r.fakeRepo.Get(ctx, category, key)
+	if r.gate {
+		r.gate = false
+		r.read <- struct{}{}
+		<-r.proceed
+	}
+	return row, err
+}
+
+func TestServiceGetDoesNotCacheStaleValueAfterConcurrentWrite(t *testing.T) {
+	writes := map[string]func(*Service) error{
+		"set": func(s *Service) error { return s.Set(context.Background(), "agent", "k", "new", false) },
+		"set_batch": func(s *Service) error {
+			return s.SetBatch(context.Background(), []model.Setting{{Category: "agent", Key: "k", Value: "new"}})
+		},
+		"delete": func(s *Service) error { return s.Delete(context.Background(), "agent", "k") },
+	}
+	for name, write := range writes {
+		t.Run(name, func(t *testing.T) {
+			repo := &gatedRepo{fakeRepo: newFakeRepo(), read: make(chan struct{}), proceed: make(chan struct{})}
+			_, _ = repo.fakeRepo.Set(context.Background(), "agent", "k", "old", false)
+			svc := New(repo, nil)
+
+			repo.gate = true
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_, _, _ = svc.Get(context.Background(), "agent", "k") // returns the old value it read
+			}()
+			<-repo.read // Get holds "old", not yet cached
+			if err := write(svc); err != nil {
+				t.Fatal(err)
+			}
+			repo.proceed <- struct{}{}
+			<-done
+
+			v, found, err := svc.Get(context.Background(), "agent", "k")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name == "delete" {
+				if found {
+					t.Fatalf("deleted key still served: %q", v)
+				}
+				return
+			}
+			if !found || v != "new" {
+				t.Fatalf("Get = %q, %v; want new, true", v, found)
+			}
+		})
+	}
+}
